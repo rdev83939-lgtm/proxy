@@ -6,7 +6,6 @@ const url = require('url');
 
 const app = express();
 
-// ── CORS ──
 app.use(cors({
   origin: '*',
   methods: ['GET', 'POST', 'OPTIONS', 'HEAD'],
@@ -46,8 +45,7 @@ const HTML_AD_SELECTORS = [
   '.ad-container, .ad-wrapper, .ad-banner, .ad-slot, .ad-unit',
   '[data-ad-slot], [data-ad-client], [data-ad-format]',
   'img[src*="ad"], img[src*="banner"], img[src*="tracking"], img[src*="pixel"]',
-  'a[href*="ad"], a[href*="sponsored"], a[href*="tracking"]',
-  'video[src*="ad"], audio[src*="ad"]'
+  'a[href*="ad"], a[href*="sponsored"], a[href*="tracking"]'
 ];
 
 const IFRAME_BLOCKING_HEADERS = [
@@ -89,6 +87,7 @@ function filterAndRewriteHTML(htmlContent, baseUrl, proxyBase) {
   let removedCount = 0;
   let rewrittenCount = 0;
 
+  // Remove ad elements
   HTML_AD_SELECTORS.forEach(selector => {
     try {
       const elements = $(selector);
@@ -97,6 +96,7 @@ function filterAndRewriteHTML(htmlContent, baseUrl, proxyBase) {
     } catch (e) {}
   });
 
+  // Scripts
   $('script').each((i, el) => {
     const text = $(el).html() || '';
     const src = $(el).attr('src') || '';
@@ -113,6 +113,7 @@ function filterAndRewriteHTML(htmlContent, baseUrl, proxyBase) {
     }
   });
 
+  // Noscript tracking
   $('noscript').each((i, el) => {
     const html = $(el).html() || '';
     if (html.includes('pixel') || html.includes('tracking') || html.includes('img')) {
@@ -120,11 +121,13 @@ function filterAndRewriteHTML(htmlContent, baseUrl, proxyBase) {
     }
   });
 
+  // Stylesheets
   $('link[rel="stylesheet"]').each((i, el) => {
     const href = $(el).attr('href');
     if (href) { $(el).attr('href', proxyUrl(resolveUrl(href, baseUrl), proxyBase)); rewrittenCount++; }
   });
 
+  // Images
   $('img').each((i, el) => {
     const src = $(el).attr('src');
     const srcset = $(el).attr('srcset');
@@ -138,19 +141,7 @@ function filterAndRewriteHTML(htmlContent, baseUrl, proxyBase) {
     }
   });
 
-  $('video, audio, source').each((i, el) => {
-    const src = $(el).attr('src');
-    if (src) { $(el).attr('src', proxyUrl(resolveUrl(src, baseUrl), proxyBase)); rewrittenCount++; }
-  });
-
-  $('iframe').each((i, el) => {
-    const src = $(el).attr('src');
-    if (src && !isAdUrl(src)) {
-      $(el).attr('src', proxyUrl(resolveUrl(src, baseUrl), proxyBase));
-      rewrittenCount++;
-    }
-  });
-
+  // Links
   $('a').each((i, el) => {
     const href = $(el).attr('href');
     if (href && !href.startsWith('#') && !href.startsWith('javascript:') && !href.startsWith('mailto:')) {
@@ -159,11 +150,13 @@ function filterAndRewriteHTML(htmlContent, baseUrl, proxyBase) {
     }
   });
 
+  // Forms
   $('form').each((i, el) => {
     const action = $(el).attr('action');
     if (action) { $(el).attr('action', proxyUrl(resolveUrl(action, baseUrl), proxyBase)); rewrittenCount++; }
   });
 
+  // Inline styles url()
   $('[style]').each((i, el) => {
     let style = $(el).attr('style') || '';
     const urlMatches = style.match(/url\((['"]?)([^'"\)]+)\1\)/g);
@@ -178,6 +171,7 @@ function filterAndRewriteHTML(htmlContent, baseUrl, proxyBase) {
     }
   });
 
+  // Base tag
   const head = $('head');
   if (head.length && !$('base').length) {
     head.prepend(`<base href="${baseUrl}">`);
@@ -208,7 +202,6 @@ app.get('/url', async (req, res) => {
     return res.status(400).json({ error: 'Invalid URL. Must start with http:// or https://' });
   }
 
-  // Dynamic proxy base from request (works on Vercel + local)
   const proto = req.headers['x-forwarded-proto'] || req.protocol || 'https';
   const host = req.headers['x-forwarded-host'] || req.headers.host || 'localhost';
   const proxyBase = `${proto}://${host}`;
@@ -228,7 +221,15 @@ app.get('/url', async (req, res) => {
       'Sec-Fetch-Site': req.headers['sec-fetch-site'] || 'none',
       'Upgrade-Insecure-Requests': '1'
     };
-    if (req.headers.referer) requestHeaders['Referer'] = req.headers.referer;
+
+    // Forward Range header for video/audio streaming support
+    if (req.headers.range) {
+      requestHeaders['Range'] = req.headers.range;
+      console.log(`[PROXY] Forwarding Range: ${req.headers.range}`);
+    }
+    if (req.headers.referer) {
+      requestHeaders['Referer'] = req.headers.referer;
+    }
 
     const response = await axios({
       method: 'GET',
@@ -238,6 +239,9 @@ app.get('/url', async (req, res) => {
       timeout: 30000,
       maxRedirects: 5,
       validateStatus: (status) => status < 500,
+      // Allow streaming responses without size limit
+      maxBodyLength: Infinity,
+      maxContentLength: Infinity
     });
 
     if (response.status >= 400) {
@@ -258,19 +262,30 @@ app.get('/url', async (req, res) => {
       if (response.headers[h]) console.log(`[IFRAME BYPASS] Stripped ${h}`);
     }
 
+    // Forward headers (including streaming headers)
     if (contentType) res.setHeader('Content-Type', contentType);
     if (contentLength) res.setHeader('Content-Length', contentLength);
     if (response.headers['last-modified']) res.setHeader('Last-Modified', response.headers['last-modified']);
     if (response.headers.etag) res.setHeader('ETag', response.headers.etag);
     if (response.headers['cache-control']) res.setHeader('Cache-Control', response.headers['cache-control']);
     if (response.headers['content-encoding']) res.setHeader('Content-Encoding', response.headers['content-encoding']);
+    if (response.headers['accept-ranges']) res.setHeader('Accept-Ranges', response.headers['accept-ranges']);
+    if (response.headers['content-range']) res.setHeader('Content-Range', response.headers['content-range']);
 
-    const isBinary = contentType.match(/(image|video|audio|application\/octet-stream|font|wasm)/i);
-    const isHTML = contentType.includes('text/html');
-    const isCSS = contentType.includes('text/css');
-    const isText = contentType.includes('text/') || contentType.includes('json');
+    const ct = contentType.toLowerCase();
+    const isBinary = ct.match(/(image|video|audio|font|wasm|mp4|webm|ogg|mpeg|mp3|wav|flac|aac|hls|dash)/i) ||
+                     ct.includes('octet-stream') ||
+                     ct.includes('mp4') ||
+                     ct.includes('webm') ||
+                     ct.includes('mpegurl') ||
+                     ct.includes('mp2t');
+    const isHTML = ct.includes('text/html');
+    const isCSS = ct.includes('text/css');
+    const isText = ct.includes('text/') || ct.includes('json') || ct.includes('javascript');
 
+    // Binary passthrough — videos, images, audio stream directly
     if (isBinary && !isHTML) {
+      console.log(`[PROXY] Binary passthrough: ${contentType} | ${contentLength || 'unknown'} bytes`);
       res.setHeader('X-Proxy-By', 'Express-CORS-Proxy');
       res.setHeader('X-Iframe-Ready', 'yes');
       return res.send(response.data);
@@ -332,8 +347,8 @@ app.get('/health', (req, res) => {
   res.json({
     status: 'ok',
     timestamp: new Date().toISOString(),
-    version: '2.1.0',
-    features: ['cors-bypass', 'iframe-bypass', 'ad-filter-html', 'url-rewrite-html', 'url-rewrite-css', 'binary-proxy']
+    version: '2.2.0',
+    features: ['cors-bypass', 'iframe-bypass', 'ad-filter-html', 'url-rewrite-html', 'url-rewrite-css', 'binary-proxy', 'range-forwarding']
   });
 });
 
