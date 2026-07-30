@@ -18,34 +18,52 @@ app.use((req, res, next) => {
   next();
 });
 
-// ── AD CONFIG ──
+// ── AD CONFIG (conservative) ──
 const AD_DOMAINS = [
-  'googleadservices.com','googlesyndication.com','doubleclick.net',
-  'google-analytics.com','facebook.com','fbcdn.net',
-  'amazon-adsystem.com','adsystem.amazon.com','advertising.com',
-  'adsrvr.org','adsymptotic.com','adnxs.com','rubiconproject.com',
-  'openx.net','pubmatic.com','casalemedia.com','contextweb.com',
-  'bluekai.com','exelator.com','mathtag.com','crwdcntrl.net',
-  'tapad.com','tradedoubler.com','criteo.com','outbrain.com',
-  'taboola.com','revcontent.com','mgid.com','adroll.com',
-  'adform.net','smartadserver.com','adtech.de','adtechus.com',
-  'aolcdn.com','yahoo.com','bing.com','scorecardresearch.com',
-  'quantserve.com','moatads.com','chartbeat.com','parsely.com',
-  'segment.io','mixpanel.com','amplitude.com','hotjar.com',
-  'luckyorange.com','inspectlet.com','fullstory.com','logrocket.com',
-  'sentry.io','bugsnag.com','newrelic.com','datadoghq.com'
+  'googleadservices.com',
+  'googlesyndication.com',
+  'doubleclick.net',
+  'google-analytics.com',
+  'googleads.g.doubleclick.net',
+  'pagead2.googlesyndication.com',
+  'tpc.googlesyndication.com',
+  'securepubads.g.doubleclick.net',
+  'pubads.g.doubleclick.net',
+  'amazon-adsystem.com',
+  'advertising.com',
+  'adsrvr.org',
+  'adnxs.com',
+  'rubiconproject.com',
+  'openx.net',
+  'pubmatic.com',
+  'criteo.com',
+  'outbrain.com',
+  'taboola.com',
+  'revcontent.com',
+  'mgid.com',
+  'adroll.com',
+  'scorecardresearch.com',
+  'quantserve.com',
+  'moatads.com',
+  'facebook.com/tr',
+  'connect.facebook.net'
 ];
 
 const HTML_AD_SELECTORS = [
-  'iframe[src*="ad"], iframe[src*="ads"], iframe[src*="doubleclick"], iframe[src*="googleads"], iframe[src*="facebook"], iframe[src*="tracking"]',
-  'script[src*="ad"], script[src*="ads"], script[src*="doubleclick"], script[src*="googleads"], script[src*="googlesyndication"], script[src*="google-analytics"], script[src*="facebook"], script[src*="tracking"], script[src*="analytics"]',
-  'div[class*="ad-"], div[class*="ads-"], div[class*="advertisement"], div[class*="banner"], div[class*="sponsored"]',
-  'div[id*="ad-"], div[id*="ads-"], div[id*="advertisement"], div[id*="banner"]',
   'ins.adsbygoogle',
-  '.ad-container, .ad-wrapper, .ad-banner, .ad-slot, .ad-unit',
-  '[data-ad-slot], [data-ad-client], [data-ad-format]',
-  'img[src*="ad"], img[src*="banner"], img[src*="tracking"], img[src*="pixel"]',
-  'a[href*="ad"], a[href*="sponsored"], a[href*="tracking"]'
+  'script[src*="googlesyndication.com"]',
+  'script[src*="doubleclick.net"]',
+  'script[src*="googleadservices.com"]',
+  'script[src*="google-analytics.com"]',
+  'script[src*="pagead2"]',
+  'script[src*="connect.facebook.net"]',
+  'script[src*="facebook.com/tr"]',
+  'iframe[src*="doubleclick.net"]',
+  'iframe[src*="googlesyndication.com"]',
+  'iframe[src*="googleadservices.com"]',
+  'iframe[src*="amazon-adsystem.com"]',
+  'iframe[src*="outbrain.com"]',
+  'iframe[src*="taboola.com"]'
 ];
 
 const IFRAME_BLOCKING_HEADERS = [
@@ -87,7 +105,6 @@ function filterAndRewriteHTML(htmlContent, baseUrl, proxyBase) {
   let removedCount = 0;
   let rewrittenCount = 0;
 
-  // Remove ad elements
   HTML_AD_SELECTORS.forEach(selector => {
     try {
       const elements = $(selector);
@@ -96,28 +113,25 @@ function filterAndRewriteHTML(htmlContent, baseUrl, proxyBase) {
     } catch (e) {}
   });
 
-  // Scripts
+  // Inline scripts with ad/tracking code
   $('script').each((i, el) => {
     const text = $(el).html() || '';
     const src = $(el).attr('src') || '';
     if (src && isAdUrl(src)) {
       $(el).remove(); removedCount++;
-    } else if (text && (text.includes('googleads') || text.includes('adsbygoogle') ||
-                         text.includes('gtag') || text.includes('analytics') ||
-                         text.includes('fbq') || text.includes('facebook-pixel') ||
-                         text.includes('tracking') || text.includes('beacon'))) {
+    } else if (text && (
+      text.includes('adsbygoogle') ||
+      text.includes('googlesyndication') ||
+      text.includes('doubleclick') ||
+      text.includes('gtag(') ||
+      text.includes('ga(') ||
+      text.includes('fbq(') ||
+      text.includes('facebook-jssdk')
+    )) {
       $(el).remove(); removedCount++;
     } else if (src) {
       $(el).attr('src', proxyUrl(resolveUrl(src, baseUrl), proxyBase));
       rewrittenCount++;
-    }
-  });
-
-  // Noscript tracking
-  $('noscript').each((i, el) => {
-    const html = $(el).html() || '';
-    if (html.includes('pixel') || html.includes('tracking') || html.includes('img')) {
-      $(el).remove(); removedCount++;
     }
   });
 
@@ -206,14 +220,16 @@ app.get('/url', async (req, res) => {
   const host = req.headers['x-forwarded-host'] || req.headers.host || 'localhost';
   const proxyBase = `${proto}://${host}`;
 
-  console.log(`[PROXY] Target: ${decodedUrl} | Base: ${proxyBase}`);
+  console.log(`[PROXY] Target: ${decodedUrl} | raw=${raw}`);
 
   try {
+    // Build request headers — DO NOT forward Accept-Encoding from client.
+    // We let axios handle compression internally, then send decompressed data.
     const requestHeaders = {
       'User-Agent': req.headers['user-agent'] || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
       'Accept': req.headers['accept'] || 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
       'Accept-Language': req.headers['accept-language'] || 'en-US,en;q=0.9',
-      'Accept-Encoding': req.headers['accept-encoding'] || 'identity',
+      'Accept-Encoding': 'gzip, deflate, br', // Let axios decompress
       'Cache-Control': 'no-cache',
       'Pragma': 'no-cache',
       'Sec-Fetch-Dest': req.headers['sec-fetch-dest'] || 'document',
@@ -222,10 +238,8 @@ app.get('/url', async (req, res) => {
       'Upgrade-Insecure-Requests': '1'
     };
 
-    // Forward Range header for video/audio streaming support
     if (req.headers.range) {
       requestHeaders['Range'] = req.headers.range;
-      console.log(`[PROXY] Forwarding Range: ${req.headers.range}`);
     }
     if (req.headers.referer) {
       requestHeaders['Referer'] = req.headers.referer;
@@ -238,18 +252,17 @@ app.get('/url', async (req, res) => {
       responseType: 'arraybuffer',
       timeout: 30000,
       maxRedirects: 5,
-      validateStatus: (status) => status < 500,
-      // Allow streaming responses without size limit
+      validateStatus: () => true, // Handle all statuses manually
       maxBodyLength: Infinity,
-      maxContentLength: Infinity
+      maxContentLength: Infinity,
+      decompress: true // axios auto-decompresses gzip/deflate/br
     });
 
-    if (response.status >= 400) {
-      return res.status(response.status).send(response.data);
-    }
-
-    const contentType = response.headers['content-type'] || 'application/octet-stream';
+    const upstreamStatus = response.status;
+    const contentType = (response.headers['content-type'] || 'application/octet-stream').toLowerCase();
     const contentLength = response.headers['content-length'];
+
+    console.log(`[PROXY] Upstream status: ${upstreamStatus} | Content-Type: ${contentType} | Length: ${contentLength || 'unknown'}`);
 
     // ── CORS ──
     res.setHeader('Access-Control-Allow-Origin', '*');
@@ -257,46 +270,54 @@ app.get('/url', async (req, res) => {
     res.setHeader('Access-Control-Allow-Headers', '*');
     res.setHeader('Access-Control-Expose-Headers', '*');
 
-    // ── IFRAME BYPASS ──
+    // ── IFRAME BYPASS: strip blocking headers ──
     for (const h of IFRAME_BLOCKING_HEADERS) {
-      if (response.headers[h]) console.log(`[IFRAME BYPASS] Stripped ${h}`);
+      if (response.headers[h]) {
+        console.log(`[IFRAME BYPASS] Stripped ${h}: ${response.headers[h]}`);
+      }
     }
 
-    // Forward headers (including streaming headers)
+    // ── FORWARD SAFE HEADERS ──
+    // NOTE: Never forward Content-Encoding because axios already decompressed the body
     if (contentType) res.setHeader('Content-Type', contentType);
     if (contentLength) res.setHeader('Content-Length', contentLength);
     if (response.headers['last-modified']) res.setHeader('Last-Modified', response.headers['last-modified']);
     if (response.headers.etag) res.setHeader('ETag', response.headers.etag);
     if (response.headers['cache-control']) res.setHeader('Cache-Control', response.headers['cache-control']);
-    if (response.headers['content-encoding']) res.setHeader('Content-Encoding', response.headers['content-encoding']);
     if (response.headers['accept-ranges']) res.setHeader('Accept-Ranges', response.headers['accept-ranges']);
     if (response.headers['content-range']) res.setHeader('Content-Range', response.headers['content-range']);
 
-    const ct = contentType.toLowerCase();
-    const isBinary = ct.match(/(image|video|audio|font|wasm|mp4|webm|ogg|mpeg|mp3|wav|flac|aac|hls|dash)/i) ||
-                     ct.includes('octet-stream') ||
-                     ct.includes('mp4') ||
-                     ct.includes('webm') ||
-                     ct.includes('mpegurl') ||
-                     ct.includes('mp2t');
-    const isHTML = ct.includes('text/html');
-    const isCSS = ct.includes('text/css');
-    const isText = ct.includes('text/') || ct.includes('json') || ct.includes('javascript');
+    // Debug headers
+    res.setHeader('X-Proxy-By', 'Express-CORS-Proxy');
+    res.setHeader('X-Iframe-Ready', 'yes');
+    res.setHeader('X-Original-URL', decodedUrl);
+    res.setHeader('X-Upstream-Status', upstreamStatus);
 
-    // Binary passthrough — videos, images, audio stream directly
-    if (isBinary && !isHTML) {
-      console.log(`[PROXY] Binary passthrough: ${contentType} | ${contentLength || 'unknown'} bytes`);
-      res.setHeader('X-Proxy-By', 'Express-CORS-Proxy');
-      res.setHeader('X-Iframe-Ready', 'yes');
+    // If upstream returned error, pass it through
+    if (upstreamStatus >= 400) {
+      console.log(`[PROXY] Upstream error ${upstreamStatus}, passing through`);
+      res.status(upstreamStatus);
       return res.send(response.data);
     }
 
-    if (raw) {
-      res.setHeader('X-Proxy-By', 'Express-CORS-Proxy');
-      res.setHeader('X-Iframe-Ready', 'yes');
-      return res.send(response.data);
+    const isBinary = contentType.match(/(image|video|audio|font|wasm|mp4|webm|ogg|mpeg|mp3|wav|flac|aac|hls|dash)/i) ||
+                     contentType.includes('octet-stream') ||
+                     contentType.includes('mp4') ||
+                     contentType.includes('webm') ||
+                     contentType.includes('mpegurl') ||
+                     contentType.includes('mp2t');
+    const isHTML = contentType.includes('text/html');
+    const isCSS = contentType.includes('text/css');
+
+    // ── RAW / BINARY PASSTHROUGH ──
+    // For raw mode OR binary content: just pass the buffer straight through
+    if (raw || (isBinary && !isHTML)) {
+      console.log(`[PROXY] Passthrough mode (raw=${raw}, binary=${isBinary && !isHTML})`);
+      res.setHeader('X-Ads-Filtered', 'no');
+      return res.status(200).send(response.data);
     }
 
+    // ── TEXT PROCESSING ──
     const encoding = contentType.includes('charset=') ? contentType.split('charset=')[1].split(';')[0].trim() : 'utf-8';
     let content;
     try { content = Buffer.from(response.data).toString(encoding); }
@@ -319,18 +340,10 @@ app.get('/url', async (req, res) => {
       processedContent = content.replace(/url\((['"]?)([^'"\)]+)\1\)/g, (match, quote, href) => {
         return `url(${quote}${proxyUrl(resolveUrl(href, decodedUrl), proxyBase)}${quote})`;
       });
-    } else if (isText) {
-      AD_DOMAINS.forEach(domain => {
-        const regex = new RegExp(`https?://[^\s"\']*${domain.replace(/\./g, '\\.')}[^\s"\']*`, 'gi');
-        processedContent = processedContent.replace(regex, '');
-      });
     }
 
-    res.setHeader('X-Proxy-By', 'Express-CORS-Proxy');
-    res.setHeader('X-Iframe-Ready', 'yes');
     res.setHeader('X-Ads-Filtered', adsRemoved ? 'yes' : 'no');
-    res.setHeader('X-Original-URL', decodedUrl);
-    res.send(processedContent);
+    res.status(200).send(processedContent);
 
   } catch (error) {
     console.error(`[ERROR] Proxy failed:`, error.message);
@@ -347,15 +360,15 @@ app.get('/health', (req, res) => {
   res.json({
     status: 'ok',
     timestamp: new Date().toISOString(),
-    version: '2.2.0',
-    features: ['cors-bypass', 'iframe-bypass', 'ad-filter-html', 'url-rewrite-html', 'url-rewrite-css', 'binary-proxy', 'range-forwarding']
+    version: '2.4.0',
+    features: ['cors-bypass', 'iframe-bypass', 'ad-filter-html', 'url-rewrite-html', 'url-rewrite-css', 'binary-proxy', 'range-forwarding', 'gzip-fix']
   });
 });
 
 app.get('/', (req, res) => {
   res.json({
     name: 'CORS Proxy + Ad Filter + Iframe Bypass',
-    description: 'Proxy any URL with CORS headers, iframe embedding support, and ad filtering',
+    description: 'Proxy any URL with CORS headers, iframe embedding support, and conservative ad filtering',
     usage: {
       proxy: '/url?url=https://example.com/path',
       raw: '/url?url=https://example.com/path&raw=1',
