@@ -105,6 +105,7 @@ function filterAndRewriteHTML(htmlContent, baseUrl, proxyBase) {
   let removedCount = 0;
   let rewrittenCount = 0;
 
+  // Remove ad elements
   HTML_AD_SELECTORS.forEach(selector => {
     try {
       const elements = $(selector);
@@ -113,7 +114,7 @@ function filterAndRewriteHTML(htmlContent, baseUrl, proxyBase) {
     } catch (e) {}
   });
 
-  // Inline scripts with ad/tracking code
+  // Scripts
   $('script').each((i, el) => {
     const text = $(el).html() || '';
     const src = $(el).attr('src') || '';
@@ -141,6 +142,12 @@ function filterAndRewriteHTML(htmlContent, baseUrl, proxyBase) {
     if (href) { $(el).attr('href', proxyUrl(resolveUrl(href, baseUrl), proxyBase)); rewrittenCount++; }
   });
 
+  // Favicon / icon
+  $('link[rel="icon"], link[rel="shortcut icon"]').each((i, el) => {
+    const href = $(el).attr('href');
+    if (href) { $(el).attr('href', proxyUrl(resolveUrl(href, baseUrl), proxyBase)); rewrittenCount++; }
+  });
+
   // Images
   $('img').each((i, el) => {
     const src = $(el).attr('src');
@@ -153,6 +160,47 @@ function filterAndRewriteHTML(htmlContent, baseUrl, proxyBase) {
       }).join(', ');
       $(el).attr('srcset', newSrcset);
     }
+  });
+
+  // Video / Audio / Source / Track — ALL routed through proxy
+  $('video, audio, source, track').each((i, el) => {
+    const src = $(el).attr('src');
+    if (src) { $(el).attr('src', proxyUrl(resolveUrl(src, baseUrl), proxyBase)); rewrittenCount++; }
+  });
+
+  // Poster images on video
+  $('video[poster]').each((i, el) => {
+    const poster = $(el).attr('poster');
+    if (poster) { $(el).attr('poster', proxyUrl(resolveUrl(poster, baseUrl), proxyBase)); rewrittenCount++; }
+  });
+
+  // Iframes (non-ad)
+  $('iframe').each((i, el) => {
+    const src = $(el).attr('src');
+    if (src && !isAdUrl(src)) {
+      $(el).attr('src', proxyUrl(resolveUrl(src, baseUrl), proxyBase));
+      rewrittenCount++;
+    }
+  });
+
+  // Embed
+  $('embed').each((i, el) => {
+    const src = $(el).attr('src');
+    if (src) { $(el).attr('src', proxyUrl(resolveUrl(src, baseUrl), proxyBase)); rewrittenCount++; }
+  });
+
+  // Object data
+  $('object').each((i, el) => {
+    const data = $(el).attr('data');
+    if (data) { $(el).attr('data', proxyUrl(resolveUrl(data, baseUrl), proxyBase)); rewrittenCount++; }
+  });
+
+  // Applet (legacy)
+  $('applet').each((i, el) => {
+    const code = $(el).attr('code');
+    const archive = $(el).attr('archive');
+    if (code) { $(el).attr('code', proxyUrl(resolveUrl(code, baseUrl), proxyBase)); rewrittenCount++; }
+    if (archive) { $(el).attr('archive', proxyUrl(resolveUrl(archive, baseUrl), proxyBase)); rewrittenCount++; }
   });
 
   // Links
@@ -223,13 +271,11 @@ app.get('/url', async (req, res) => {
   console.log(`[PROXY] Target: ${decodedUrl} | raw=${raw}`);
 
   try {
-    // Build request headers — DO NOT forward Accept-Encoding from client.
-    // We let axios handle compression internally, then send decompressed data.
     const requestHeaders = {
       'User-Agent': req.headers['user-agent'] || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
       'Accept': req.headers['accept'] || 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
       'Accept-Language': req.headers['accept-language'] || 'en-US,en;q=0.9',
-      'Accept-Encoding': 'gzip, deflate, br', // Let axios decompress
+      'Accept-Encoding': 'gzip, deflate, br',
       'Cache-Control': 'no-cache',
       'Pragma': 'no-cache',
       'Sec-Fetch-Dest': req.headers['sec-fetch-dest'] || 'document',
@@ -252,10 +298,10 @@ app.get('/url', async (req, res) => {
       responseType: 'arraybuffer',
       timeout: 30000,
       maxRedirects: 5,
-      validateStatus: () => true, // Handle all statuses manually
+      validateStatus: () => true,
       maxBodyLength: Infinity,
       maxContentLength: Infinity,
-      decompress: true // axios auto-decompresses gzip/deflate/br
+      decompress: true
     });
 
     const upstreamStatus = response.status;
@@ -270,15 +316,14 @@ app.get('/url', async (req, res) => {
     res.setHeader('Access-Control-Allow-Headers', '*');
     res.setHeader('Access-Control-Expose-Headers', '*');
 
-    // ── IFRAME BYPASS: strip blocking headers ──
+    // ── IFRAME BYPASS ──
     for (const h of IFRAME_BLOCKING_HEADERS) {
       if (response.headers[h]) {
         console.log(`[IFRAME BYPASS] Stripped ${h}: ${response.headers[h]}`);
       }
     }
 
-    // ── FORWARD SAFE HEADERS ──
-    // NOTE: Never forward Content-Encoding because axios already decompressed the body
+    // Forward headers (NEVER Content-Encoding — axios already decompressed)
     if (contentType) res.setHeader('Content-Type', contentType);
     if (contentLength) res.setHeader('Content-Length', contentLength);
     if (response.headers['last-modified']) res.setHeader('Last-Modified', response.headers['last-modified']);
@@ -287,32 +332,30 @@ app.get('/url', async (req, res) => {
     if (response.headers['accept-ranges']) res.setHeader('Accept-Ranges', response.headers['accept-ranges']);
     if (response.headers['content-range']) res.setHeader('Content-Range', response.headers['content-range']);
 
-    // Debug headers
     res.setHeader('X-Proxy-By', 'Express-CORS-Proxy');
     res.setHeader('X-Iframe-Ready', 'yes');
     res.setHeader('X-Original-URL', decodedUrl);
     res.setHeader('X-Upstream-Status', upstreamStatus);
 
-    // If upstream returned error, pass it through
     if (upstreamStatus >= 400) {
       console.log(`[PROXY] Upstream error ${upstreamStatus}, passing through`);
       res.status(upstreamStatus);
       return res.send(response.data);
     }
 
-    const isBinary = contentType.match(/(image|video|audio|font|wasm|mp4|webm|ogg|mpeg|mp3|wav|flac|aac|hls|dash)/i) ||
-                     contentType.includes('octet-stream') ||
-                     contentType.includes('mp4') ||
-                     contentType.includes('webm') ||
-                     contentType.includes('mpegurl') ||
-                     contentType.includes('mp2t');
     const isHTML = contentType.includes('text/html');
     const isCSS = contentType.includes('text/css');
 
-    // ── RAW / BINARY PASSTHROUGH ──
-    // For raw mode OR binary content: just pass the buffer straight through
-    if (raw || (isBinary && !isHTML)) {
-      console.log(`[PROXY] Passthrough mode (raw=${raw}, binary=${isBinary && !isHTML})`);
+    // ── RAW MODE: pass everything through untouched ──
+    if (raw) {
+      res.setHeader('X-Ads-Filtered', 'no');
+      return res.status(200).send(response.data);
+    }
+
+    // ── BINARY / NON-TEXT: proxy through ──
+    // Everything that is NOT HTML or CSS gets proxied as-is
+    if (!isHTML && !isCSS) {
+      console.log(`[PROXY] Binary passthrough: ${contentType}`);
       res.setHeader('X-Ads-Filtered', 'no');
       return res.status(200).send(response.data);
     }
@@ -360,15 +403,15 @@ app.get('/health', (req, res) => {
   res.json({
     status: 'ok',
     timestamp: new Date().toISOString(),
-    version: '2.4.0',
-    features: ['cors-bypass', 'iframe-bypass', 'ad-filter-html', 'url-rewrite-html', 'url-rewrite-css', 'binary-proxy', 'range-forwarding', 'gzip-fix']
+    version: '2.5.0',
+    features: ['cors-bypass', 'iframe-bypass', 'ad-filter-html', 'url-rewrite-all', 'url-rewrite-css', 'binary-proxy', 'range-forwarding']
   });
 });
 
 app.get('/', (req, res) => {
   res.json({
     name: 'CORS Proxy + Ad Filter + Iframe Bypass',
-    description: 'Proxy any URL with CORS headers, iframe embedding support, and conservative ad filtering',
+    description: 'Proxy any URL with CORS headers, iframe embedding support, and conservative ad filtering. ALL traffic routed through proxy.',
     usage: {
       proxy: '/url?url=https://example.com/path',
       raw: '/url?url=https://example.com/path&raw=1',
